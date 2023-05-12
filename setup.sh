@@ -1,0 +1,1 @@
+sudo dnf update -y && sudo dnf install make -y
