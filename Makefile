@@ -5,13 +5,30 @@ TMP_PATH=/tmp/local
 OPENMPI=openmpi-4.1.5
 PYTHON_VERSION=3.9
 PYTHON=python$(PYTHON_VERSION)
-REQUIREMENT_FILE=requirements.txt
-SSH_KEY_FNAME := $(strip id_ed25519_$(subst .,_,$(shell hostname -I)))
 HOST_CIDR := $(shell ip route | grep src | grep eth0 | grep /)
 HOST_CIDR := $(firstword $(HOST_CIDR))
+APP_HOST_PATH := $(HOME)/public-materials/mpi/sample-app/hosts
 
 
-all: install-python install-native-openmpi install-sample-app refresh-env
+.PHONY: conf-known_hosts \
+	conf-ignore-hostkey-verification
+
+conf-server-with-app: install-python \
+	install-native-openmpi \
+	install-sample-app \
+	conf-nfs-server \
+	conf-known_hosts  \
+	refresh-env
+
+conf-server: install-python \
+	install-native-openmpi \
+	conf-nfs-server \
+	conf-known_hosts  \
+	refresh-env
+
+conf-client: install-python \
+	conf-nfs-client \
+	refresh-env
 
 install-python:
 	sudo dnf update -y
@@ -21,7 +38,9 @@ install-python:
 	$(PYTHON) -m pip install pip --upgrade --user
 	$(PYTHON) --version
 
+
 install-native-openmpi:
+ifeq ($(shell test ! -f /opt/openmpi/bin/mpirun && echo yes), yes)
 	sudo dnf makecache --refresh
 	sudo dnf -y install gcc-c++ perl
 	sudo mkdir -p $(TMP_PATH)
@@ -40,10 +59,13 @@ endif
 
 	echo "export PATH=$$PATH:/opt/openmpi/bin" >> $(HOME)/.bashrc
 	echo "export LD_LIBRARY_PATH=$$LD_LIBRARY_PATH:/opt/openmpi/lib" >> $(HOME)/.bashrc
+endif
+
 
 refresh-env:
 	# Refresh environment variables
 	exec bash
+
 
 conf-nfs-server:
 	sudo dnf install nfs-utils
@@ -64,23 +86,41 @@ endif
 	sudo systemctl enable nfs-server
 	sudo systemctl start nfs-server
 
+
+conf-known_hosts:
+	cat /dev/null > ~/.ssh/known_hosts
+ifneq ($(IP_ADDR), )
+	@echo Adding `$(IP_ADDR)` to known hosts.
+	ssh-keyscan -H $(IP_ADDR) >> ~/.ssh/known_hosts
+else ifeq ($(shell test -f hosts && echo yes), yes)
+	@echo Adding \'$(shell cat hosts |  tr '\n' ',' )\' to known hosts.
+	for host in $(shell cut -d " " -f 1 hosts*); do ssh-keyscan -H $$host >>  ~/.ssh/known_hosts; done
+else
+	$(error 'Please provide node's private IP address via `IP_ADDR=<ip_addr>` or \n or create a `hosts` file containing the addresses.')
+endif
+
+
+conf-ignore-hostkey-verification:
+	@echo -e  "Match exec \"ping -q -c 1 -t 1 %h | grep '10\\.0\\.'\" \
+		\n\tStrictHostKeyChecking no \
+		\n\tUserKnownHostsFile /dev/null ">> ~/.ssh/config
+	@sudo chmod 600 ~/.ssh/config
+
+
 conf-nfs-client:
 ifeq ($(NFS_IP_ADDR),)
 	$(error 'Please set NFS Server ip address via `make configure-node NFS_IP_ADDR=10.0.0.120`')
 endif
 
 	$(MAKE) install-python
-	sudo dnf install nfs-utils
+	sudo dnf makecache --refresh
+	sudo dnf -y install nfs-utils gcc-c++ perl
 
 	@echo Mounting '/home' and '/opt' directories to NFS_SERVER:$(NFS_IP_ADDR).
 	$(shell cd / && sudo mount $(NFS_IP_ADDR):/home /home && sudo mount $(NFS_IP_ADDR):/opt /opt)
 
-ifeq ($(shell test ! -f $(HOME)/.ssh/$(SSH_KEY_FNAME) && echo yes), yes)
-	ssh-keygen -t ed25519 -N "" -f $(HOME)/.ssh/$(SSH_KEY_FNAME)
-	sudo chmod 400 $(HOME)/.ssh/$(SSH_KEY_FNAME)
-endif
-	cat $(HOME)/.ssh/$(SSH_KEY_FNAME).pub >> $(HOME)/.ssh/authorized_keys
 	sudo setsebool -P use_nfs_home_dirs 1
+
 
 install-sample-app:
 ifeq ($(shell test ! -f .env && echo yes), yes)
@@ -94,3 +134,14 @@ endif
 	@cd public-materials && git pull
 	
 	env MPICC=/opt/openmpi/bin/mpicc pip3.9 install -r public-materials/mpi/sample-app/requirements.txt
+
+	ln -sf $(HOME)/hosts $(HOME)/public-materials/mpi/sample-app/hosts
+
+
+test-app:
+ifeq ($(HOSTS),)
+	$(error 'Please provide host absolute file path.')
+endif
+	$(shell ln -sf $(HOSTS) $(APP_HOST_PATH))
+	@echo "MPI Nodes >>> [$(shell cat $(APP_HOST_PATH) |  tr '\n' ',' )]"
+	make -C $(HOME)/public-materials/mpi/sample-app

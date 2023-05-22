@@ -1,4 +1,6 @@
-all: clean run4_30mb report
+.PHONY: hosts
+
+all: clean hosts run4_30mb report
 
 hosts:
 	cat hosts
